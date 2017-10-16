@@ -7,17 +7,23 @@ defmodule Protobuf.DefineMessage do
   alias Protobuf.OneOfField
   alias Protobuf.Delimited
 
-  def def_message(name, fields, [inject: inject, doc: doc]) when is_list(fields) do
-    struct_fields = record_fields(fields)
+
+  def def_message(name, fields, [inject: inject, doc: doc, erl_module: erl_module, options: options, syntax: syntax]) when is_list(fields) do
+    struct_fields = record_fields(fields, options)
+
     # Inject everything in 'using' module
     if inject do
       quote location: :keep do
         @root __MODULE__
         @record unquote(struct_fields)
+
         defstruct @record
         fields = unquote(struct_fields)
 
         def record, do: @record
+        def erl_module, do: unquote(erl_module)
+        def options, do: unquote(options)
+        def syntax, do: unquote(syntax)
 
         unquote(encode_decode(name))
         unquote(fields_methods(fields))
@@ -39,11 +45,17 @@ defmodule Protobuf.DefineMessage do
         defmodule unquote(name) do
           @moduledoc false
           unquote(Protobuf.Config.doc_quote(doc))
+
           @root root
           @record unquote(struct_fields)
+          @erl_module unquote(erl_module)
+
           defstruct @record
 
           def record, do: @record
+          def erl_module, do: unquote(erl_module)
+          def options, do: unquote(options)
+          def syntax, do: unquote(syntax)
 
           unquote(encode_decode(name))
           unquote(fields_methods(fields))
@@ -67,42 +79,8 @@ defmodule Protobuf.DefineMessage do
   defp constructors(name) do
     quote location: :keep do
       def new(), do: new([])
-      def new(values) when is_list(values) do
-        values = Enum.into(values, %{})
-        s = struct(unquote(name))
-        keys = Map.keys(Map.from_struct(s))
-        Enum.reduce(keys, s, fn
-          key, acc ->
-            default = get_default(key)
-            value = Map.get(values, key, default)
-            Map.put(acc, key, value)
-        end)
-      end
-
-      defp get_default(field) do
-        case __MODULE__.defs(:field, field) do
-          %Protobuf.OneOfField{} -> nil
-          %Protobuf.Field{occurrence: :repeated} -> []
-          x ->
-            default = get_in(Map.from_struct(x), [:opts, :default])
-            case {x.type, x.occurrence} do
-              {:string, _} when not is_nil(default) ->
-                default
-              {:string, :optional} ->
-                nil
-              {:string, _} ->
-                ""
-              {ty, _} when not is_nil(default) ->
-                default
-              {_ty, :optional} ->
-                nil
-              {ty, _} ->
-                case :gpb.proto3_type_default(ty, __MODULE__.defs) do
-                  :undefined -> nil
-                  default -> default
-                end
-            end
-        end
+      def new(values) do
+        struct(unquote(name), values)
       end
     end
   end
@@ -110,7 +88,7 @@ defmodule Protobuf.DefineMessage do
   defp encode_decode(_name) do
     quote do
       def decode(data),         do: Decoder.decode(data, __MODULE__)
-      def encode(%{} = record), do: Encoder.encode(record, defs())
+      def encode(%{} = record), do: Encoder.encode(record, __MODULE__)
       def decode_delimited(bytes),    do: Delimited.decode(bytes, __MODULE__)
       def encode_delimited(messages), do: Delimited.encode(messages)
     end
@@ -143,10 +121,14 @@ defmodule Protobuf.DefineMessage do
     end
   end
 
-  defp record_fields(fields) do
+  defp record_fields(fields, options) do
     fields
     |> Enum.map(fn(field) ->
       case field do
+        %Field{name: name, occurrence: :repeated, type: type}
+        when is_tuple(type) and elem(type, 0) == :map ->
+          value = if Enum.member?(options, :mapfields_as_maps), do: Macro.escape(%{}), else: []
+          {name, value}
         %Field{name: name, occurrence: :repeated} ->
           {name, []}
         %Field{name: name, opts: [default: default]} ->
@@ -161,5 +143,4 @@ defmodule Protobuf.DefineMessage do
     end)
     |> Enum.reject(fn(field) -> is_nil(field) end)
   end
-
 end

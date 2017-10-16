@@ -1,26 +1,13 @@
 defmodule Protobuf.Decoder do
   use Bitwise, only_operators: true
+
   alias Protobuf.Field
   alias Protobuf.OneOfField
   alias Protobuf.Utils
 
   # Decode with record/module
   def decode(bytes, module) do
-    defs = for {{type, mod}, fields} <- module.defs, into: [] do
-      case type do
-        :msg ->
-          {{:msg, mod}, Enum.map(fields, fn field ->
-            case field do
-              %Field{}      -> Utils.convert_to_record(field, Field)
-              %OneOfField{} -> Utils.convert_to_record(field, OneOfField)
-            end
-          end)}
-        :enum       -> {{:enum, mod}, fields}
-        :extensions -> {{:extensions, mod}, fields}
-        :service -> {{:service, mod}, fields}
-      end
-    end
-    :gpb.decode_msg(bytes, module, defs)
+    module.erl_module.decode_msg(bytes, Utils.to_module_atom(module))
     |> Utils.convert_from_record(module)
     |> convert_fields
   end
@@ -35,33 +22,22 @@ defmodule Protobuf.Decoder do
       field, %{__struct__: module} = msg ->
         value = Map.get(msg, field)
         if value == :undefined do
-          Map.put(msg, field, get_default(field, module))
+          Map.put(msg, field, Utils.get_default(module.syntax(), field, module))
         else
           convert_field(value, msg, module.defs(:field, field))
         end
     end)
   end
 
-  defp get_default(field, module) do
-    case module.defs(:field, field) do
-      %Protobuf.OneOfField{} -> nil
-      x ->
-        case x.type do
-          :string ->
-            ""
-          ty ->
-            case :gpb.proto3_type_default(ty, module.defs) do
-              :undefined -> nil
-              default -> default
-            end
-        end
-    end
-  end
-
   defp convert_field(value, msg, %Field{name: field, type: type, occurrence: occurrence}) do
     case {occurrence, type} do
       {:repeated, _} ->
-        value = for v <- value, do: convert_value(type, v)
+        value =
+          cond  do
+            is_list(value) -> for v <- value, do: convert_value(type, v)
+            is_map(value)  -> convert_value(type, value)
+            true           -> value
+          end
         Map.put(msg, field, value)
       {_, :string}   ->
         Map.put(msg, field, convert_value(type, value))
@@ -79,6 +55,8 @@ defmodule Protobuf.Decoder do
         module = elem(inner_value, 0)
         converted_value = {key, inner_value |> Utils.convert_from_record(module) |> convert_fields}
         Map.put(msg, field, converted_value)
+      is_list(inner_value) ->
+        Map.put(msg, field, {key, convert_value(:string, inner_value)})
       true ->
         Map.put(msg, field, value)
     end
@@ -88,6 +66,13 @@ defmodule Protobuf.Decoder do
     do: :unicode.characters_to_binary(value)
   defp convert_value({:msg, _}, value),
     do: value |> Utils.convert_from_record(elem(value, 0)) |> convert_fields
+  defp convert_value({:map, key_type, value_type}, value) when is_map(value) do
+    Enum.reduce(value, %{}, fn({key, value}, acc) ->
+      key   = convert_value(key_type, key)
+      value = convert_value(value_type, value)
+      Map.merge(acc, %{key => value})
+    end)
+  end
   defp convert_value({:map, key_type, value_type}, {key, value}),
     do: {convert_value(key_type, key), convert_value(value_type, value)}
   defp convert_value(_, value),

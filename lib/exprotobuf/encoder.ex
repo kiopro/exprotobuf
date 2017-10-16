@@ -3,43 +3,26 @@ defmodule Protobuf.Encoder do
   alias Protobuf.Field
   alias Protobuf.OneOfField
 
-  def encode(%{} = msg, defs) do
-    fixed_defs = for {{type, mod}, fields} <- defs, into: [] do
-      case type do
-        :msg  -> {{:msg, mod}, Enum.map(fields, fn field ->
-          case field do
-            %OneOfField{} -> field |> Utils.convert_to_record(OneOfField)
-            %Field{} -> field |> Utils.convert_to_record(Field)
-          end
-        end)}
-        :enum -> {{:enum, mod}, fields}
-        :extensions -> {{:extensions, mod}, fields}
-        :service -> {{:service, mod}, fields}
-      end
-    end
-
+  def encode(%{} = msg, module) do
     msg
-    |> fix_undefined
+    |> fix_undefined(module)
     |> Utils.convert_to_record(msg.__struct__)
-    |> :gpb.encode_msg(fixed_defs)
+    |> module.erl_module.encode_msg
   end
 
-  defp fix_undefined(%{} = msg) do
+  defp fix_undefined(%{} = msg, module) do
     Enum.reduce(Map.keys(msg), msg, fn
       field, msg ->
-        original = Map.get(msg, field)
-        fixed    = fix_value(original)
-        if original != fixed do
-          Map.put(msg, field, fixed)
+        value = Map.get(msg, field)
+        if should_be_fixed?(value) do
+          fixed_value = Utils.get_default(module.syntax(), field, module)
+          Map.put(msg, field, fixed_value)
         else
           msg
         end
     end)
   end
 
-  defp fix_value(nil),                         do: :undefined
-  defp fix_value(values) when is_list(values), do: Enum.map(values, &fix_value/1)
-  defp fix_value(value)  when is_map(value),   do: value |> fix_undefined |> Utils.convert_to_record(value.__struct__)
-  defp fix_value(value)  when is_tuple(value), do: value |> Tuple.to_list |> Enum.map(&fix_value/1) |> List.to_tuple
-  defp fix_value(value),                       do: value
+  def should_be_fixed?(nil), do: true
+  def should_be_fixed?(_), do: false
 end
